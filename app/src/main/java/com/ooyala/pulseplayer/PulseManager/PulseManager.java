@@ -16,14 +16,16 @@ import com.ooyala.adtech.RequestSettings;
 import com.ooyala.pulse.Pulse;
 import com.ooyala.pulse.PulseAdBreak;
 import com.ooyala.pulse.PulseAdError;
+import com.ooyala.pulse.PulsePauseAd;
 import com.ooyala.pulse.PulseSession;
 import com.ooyala.pulse.PulseSessionListener;
 import com.ooyala.pulse.PulseVideoAd;
-import com.ooyala.pulseplayer.BuildConfig;
 import com.ooyala.pulseplayer.R;
 import com.ooyala.pulseplayer.utils.VideoItem;
+import com.ooyala.pulseplayer.videoPlayer.CustomImageView;
 import com.ooyala.pulseplayer.videoPlayer.CustomVideoView;
 
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,16 +35,18 @@ import java.util.List;
 /**
  * A manager class responsible for communicating with Pulse SDK through implementation of PulseSessionListener.
  */
-public class PulseManager implements PulseSessionListener {
+public class PulseManager implements PulseSessionListener  {
     private PulseSession pulseSession;
     private PulseVideoAd currentPulseVideoAd;
+    private PulsePauseAd currentPulsePauseAd;
 
     private CustomVideoView videoPlayer;
     private Uri videoContentUri;
     private MediaController controlBar;
     private Button skipBtn;
+    private CustomImageView pauseImageView;
     private long currentContentProgress = 0;
-    private boolean duringVideoContent = false, duringAd = false;
+    private boolean duringVideoContent = false, duringAd = false, duringPause = false;
     private boolean contentStarted = false;
     private boolean adPaused = false;
     private boolean adStarted = false;
@@ -57,11 +61,12 @@ public class PulseManager implements PulseSessionListener {
     public static Handler contentProgressHandler;
     public static Handler playbackHandler = new Handler();
 
-    public PulseManager(VideoItem videoItem, CustomVideoView videoPlayer, MediaController controllBar, Button skipButton, Activity activity) {
+    public PulseManager(VideoItem videoItem, CustomVideoView videoPlayer, MediaController controllBar, Button skipButton, CustomImageView imageView, Activity activity) {
         this.videoItem = videoItem;
         this.videoPlayer = videoPlayer;
         this.controlBar = controllBar;
         this.skipBtn = skipButton;
+        this.pauseImageView = imageView;
         this.activity = activity;
 
         // Create and start a pulse session
@@ -91,8 +96,9 @@ public class PulseManager implements PulseSessionListener {
         videoPlayer.setOnTouchListener(null);
         videoPlayer.setOnPreparedListener(null);
         videoPlayer.setOnCompletionListener(null);
-        contentStarted = true;
-
+        if (!duringPause) {
+            contentStarted = true;
+        }
         playVideoContent();
     }
 
@@ -104,7 +110,6 @@ public class PulseManager implements PulseSessionListener {
         //Pause the content playback and remove the player listener.
         Log.i("Pulse Demo Player", "Ad break started.");
         duringAd = false;
-        videoPlayer.pause();
         videoPlayer.setMediaStateListener(null);
         videoPlayer.setOnPreparedListener(null);
         videoPlayer.setOnCompletionListener(null);
@@ -123,6 +128,74 @@ public class PulseManager implements PulseSessionListener {
         currentPulseVideoAd = pulseVideoAd;
         adPlaybackTimeout = (long) timeout;
         playAdContent(timeout, pulseVideoAd);
+    }
+
+    /**
+     * Pulse SDK calls this method when pause ad should be displayed.
+     *
+     * @param pulsePauseAd The {@link PulsePauseAd} that should be displayed.
+     */
+    @Override
+    public void showPauseAd(PulsePauseAd pulsePauseAd) {
+        Log.i("Pulse Demo Player", "Pulse signaled pause ad display");
+        currentPulsePauseAd = pulsePauseAd;
+        if (!videoPlayer.isPlaying()) {
+            if (pauseImageView != null && currentPulsePauseAd != null) {
+                //Assign a listener to the custom imageView to monitor its image related events.
+                pauseImageView.setCustomImgViewListener(new CustomImageView.CustomImgViewListener() {
+                    @Override
+                    public void onCloseBtnCLicked() {
+                        // If user closed the pause ad, report adClosed to Pulse SDK.
+                        pauseImageView.setVisibility(View.INVISIBLE);
+                        currentPulsePauseAd.adClosed();
+                        currentPulsePauseAd = null;
+                    }
+
+                    @Override
+                    public void onPauseAdClicked() {
+                        // If user clicked on the pause ad, report adClickThroughTriggered to Pulse SDK.
+                        if (currentPulsePauseAd != null) {
+                            if (currentPulsePauseAd.getClickThroughURL() != null) {
+                                currentPulsePauseAd.adClickThroughTriggered();
+                                clickThroughCallback.onPauseAdClicked(currentPulsePauseAd.getClickThroughURL());
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onImageDisplayed() {
+                        // If resource was successfully loaded and player is still in paused mode, report adDisplayed to Pulse SDK.
+                        if (!videoPlayer.isPlaying()) {
+                            pauseImageView.setVisibility(View.VISIBLE);
+                            if (currentPulsePauseAd != null) {
+                                currentPulsePauseAd.adDisplayed();
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onImageLoadingFailed(PulseAdError error) {
+                        // If loading resource failed report the error to Pulse SDK.
+                        if (currentPulsePauseAd != null) {
+                            currentPulsePauseAd.adFailed(error);
+                        }
+                    }
+                });
+
+                // Set up the imageView to show the pause ad.
+                pauseImageView.init();
+                // Get the mime type of the pause ad resource.
+                String pauseAdType = currentPulsePauseAd.getResourceType();
+                // Verify if the resource format is supported.
+                if (pauseAdType.equals("image/jpeg")) {
+                    URL srcUrl = currentPulsePauseAd.getResourceURL();
+                    // If the resource is reachable, try loading the resource.
+                    if (srcUrl != null) {
+                        pauseImageView.loadImage(srcUrl);
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -149,11 +222,12 @@ public class PulseManager implements PulseSessionListener {
     public void illegalOperationOccurred(com.ooyala.adtech.Error error) {
         // In debug mode a runtime exception would be thrown in order to find and
         // correct mistakes in the integration.
-        if (BuildConfig.DEBUG) {
+        if (android.support.v7.appcompat.BuildConfig.DEBUG) {
             throw new RuntimeException(error.getMessage());
         } else {
             // Don't know how to recover from this, stop the session and continue
             // with the content.
+            Log.i("Pulse Demo Player", error.getMessage());
             pulseSession.stopSession();
             pulseSession = null;
             startContentPlayback();
@@ -173,19 +247,39 @@ public class PulseManager implements PulseSessionListener {
             public void onPlay() {
                 //contentStarted boolean is used to ensure that contentStarted event is only reported once.
                 if (contentStarted) {
-                    //Report start of content playback.
-                    pulseSession.contentStarted();
+                    if (pulseSession != null) {
+                        //Report start of content playback.
+                        pulseSession.contentStarted();
+                    }
                     contentStarted = false;
-                    Log.i("Pulse Demo Player", "Content playback started.");
-                } else {
-                    Log.i("Pulse Demo Player", "Content playback resumed.");
                 }
                 duringVideoContent = true;
             }
 
             @Override
             public void onPause() {
+                duringVideoContent = false;
+                duringAd = false;
+                duringPause = true;
+                if (pulseSession != null) {
+                    pulseSession.contentPaused();
+                }
+            }
 
+            @Override
+            public void onResume() {
+                duringVideoContent = true;
+                if (pulseSession != null) {
+                    pulseSession.contentStarted();
+                }
+
+                if (pauseImageView.getVisibility() == View.VISIBLE) {
+                    pauseImageView.setVisibility(View.INVISIBLE);
+                    if (duringPause) {
+                        currentPulsePauseAd = null;
+                    }
+                }
+                duringPause = false;
             }
         });
 
@@ -193,8 +287,15 @@ public class PulseManager implements PulseSessionListener {
         videoPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
             @Override
             public void onPrepared(MediaPlayer mp) {
-                videoPlayer.seekTo((int) (currentContentProgress));
-                videoPlayer.play();
+                //If user return from pauseAd ClickThrough
+                if (duringPause) {
+                    videoPlayer.seekTo((int) (currentContentProgress));
+
+                } else {
+                    videoPlayer.seekTo((int) (currentContentProgress));
+                    videoPlayer.play();
+                }
+
             }
         });
 
@@ -204,7 +305,9 @@ public class PulseManager implements PulseSessionListener {
             public void onCompletion(MediaPlayer mp) {
                 //Inform Pulse SDK about content completion.
                 Log.i("Pulse Demo Player", "Content playback completed.");
-                pulseSession.contentFinished();
+                if (pulseSession != null) {
+                    pulseSession.contentFinished();
+                }
                 duringVideoContent = false;
             }
         });
@@ -234,8 +337,8 @@ public class PulseManager implements PulseSessionListener {
     /**
      * Try to play the provided ad.
      *
-     * @param timeout The timeout for ad playback.
-     * @param pulseVideoAd   The ad video.
+     * @param timeout      The timeout for ad playback.
+     * @param pulseVideoAd The ad video.
      */
     public void playAdContent(float timeout, final PulseVideoAd pulseVideoAd) {
         controlBar.setVisibility(View.INVISIBLE);
@@ -255,7 +358,8 @@ public class PulseManager implements PulseSessionListener {
                 if (adPaused) {
                     videoPlayer.setMediaStateListener(null);
                     resumeAdPlayback();
-                } else {
+                }
+                else {
                     //If this is the first time this ad is played, report adStarted to Pulse.
                     if (!adStarted) {
                         adStarted = true;
@@ -275,6 +379,11 @@ public class PulseManager implements PulseSessionListener {
                 //Report ad paused to Pulse SDK.
                 pulseVideoAd.adPaused();
                 adPaused = true;
+            }
+
+            @Override
+            public void onResume() {
+
             }
         });
 
@@ -359,7 +468,7 @@ public class PulseManager implements PulseSessionListener {
             videoPlayer.setOnPreparedListener(null);
             //Report ad resume to Pulse SDK.
             currentPulseVideoAd.adResumed();
-            if(!adStarted){
+            if (!adStarted) {
                 playbackHandler.postDelayed(playbackRunnable, (adPlaybackTimeout * 1000));
             }
             videoPlayer.seekTo((int) (currentAdProgress));
@@ -385,6 +494,11 @@ public class PulseManager implements PulseSessionListener {
                 @Override
                 public void onPause() {
                     currentPulseVideoAd.adPaused();
+                }
+
+                @Override
+                public void onResume() {
+
                 }
             });
         }
@@ -421,7 +535,7 @@ public class PulseManager implements PulseSessionListener {
      */
     private RequestSettings getRequestSettings() {
         RequestSettings newRequestSettings = new RequestSettings();
-        List<RequestSettings.InsertionPointType> filter = new ArrayList<>();
+
         if (videoItem.getMidrollPositions() != null && videoItem.getMidrollPositions().length != 0) {
             ArrayList<Float> playbackPosition = new ArrayList<>();
             for (int i = 0; i < videoItem.getMidrollPositions().length; i++) {
@@ -439,8 +553,8 @@ public class PulseManager implements PulseSessionListener {
      */
     private ContentMetadata getContentMetadata() {
         ContentMetadata contentMetadata = new ContentMetadata();
-        contentMetadata.setCategory(videoItem.getCategory());
         contentMetadata.setTags(new ArrayList<>(Arrays.asList(videoItem.getTags())));
+        contentMetadata.setCategory(videoItem.getCategory());
         return contentMetadata;
     }
 
@@ -462,7 +576,7 @@ public class PulseManager implements PulseSessionListener {
      *
      * @param handler the handler that should be started.
      */
-    public void setCallBackHandler(Handler handler){
+    public void setCallBackHandler(Handler handler) {
         if (handler == playbackHandler) {
             playbackHandler.post(playbackRunnable);
         } else if (handler == contentProgressHandler) {
@@ -475,13 +589,13 @@ public class PulseManager implements PulseSessionListener {
      *
      * @param currentAdPlayhead the ad playback progress.
      */
-    private void updateSkipButton(int currentAdPlayhead){
-        if(currentPulseVideoAd.isSkippable() && !skipEnabled){
-            if (skipBtn.getVisibility() == View.VISIBLE){
-                int remainingTime = (int)(currentPulseVideoAd.getSkipOffset() - currentAdPlayhead);
+    private void updateSkipButton(int currentAdPlayhead) {
+        if (currentPulseVideoAd.isSkippable() && !skipEnabled) {
+            if (skipBtn.getVisibility() == View.VISIBLE) {
+                int remainingTime = (int) (currentPulseVideoAd.getSkipOffset() - currentAdPlayhead);
                 skipBtn.setText(skipBtnText + Integer.toString(remainingTime));
             }
-            if((currentPulseVideoAd.getSkipOffset() <= (currentAdPlayhead))){
+            if ((currentPulseVideoAd.getSkipOffset() <= (currentAdPlayhead))) {
                 skipBtn.setText(R.string.skip_ad);
                 skipEnabled = true;
                 skipBtn.setOnClickListener(new View.OnClickListener() {
@@ -501,8 +615,9 @@ public class PulseManager implements PulseSessionListener {
 
     ////////////////////click through related methods///////////
     public void returnFromClickThrough() {
-        Log.i("Pulse Demo Player","returnFromClickThrough is called");
-        resumeAdPlayback();
+        if (duringAd) {
+            resumeAdPlayback();
+        }
     }
 
     public void setOnClickThroughCallback(ClickThroughCallback callback) {
@@ -511,6 +626,8 @@ public class PulseManager implements PulseSessionListener {
 
     public interface ClickThroughCallback {
         void onClicked(PulseVideoAd ad);
+
+        void onPauseAdClicked(URL url);
     }
 
     /////////////////////Runnable methods//////////////////////
@@ -543,17 +660,23 @@ public class PulseManager implements PulseSessionListener {
                 if (videoPlayer.getCurrentPosition() != 0) {
                     currentContentProgress = videoPlayer.getCurrentPosition();
                     //Report content progress to Pulse SDK. This progress would be used to trigger ad break.
-                    pulseSession.contentPositionChanged(currentContentProgress / 1000);
+                    if (pulseSession != null) {
+                        pulseSession.contentPositionChanged(currentContentProgress / 1000);
+                    }
                 }
 
             } else if (duringAd) {
                 if (videoPlayer.getCurrentPosition() != 0) {
                     currentAdProgress = videoPlayer.getCurrentPosition();
                     //Report ad video progress to Pulse SDK.
-                    currentPulseVideoAd.adPositionChanged(currentAdProgress / 1000);
-                    updateSkipButton((int)(currentAdProgress / 1000));
+                    if (currentPulseVideoAd != null){
+                        currentPulseVideoAd.adPositionChanged(currentAdProgress / 1000);
+                    }
+                    updateSkipButton((int) (currentAdProgress / 1000));
                 }
             }
         }
     };
 }
+
+
